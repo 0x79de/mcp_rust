@@ -1,9 +1,13 @@
 use std::sync::{Arc, Mutex};
+use std::env;
 use mcp_rust_sdk::client::Client;
 use mcp_rust_sdk::transport::websocket::WebSocketTransport;
+use tokio_tungstenite::MaybeTlsStream;
+use tokio::net::TcpStream;
 use serde_json::Value;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
+use std::time::Duration;
 
 // Structure to represent a radiology image
 #[derive(Clone, Serialize, Deserialize)]
@@ -93,11 +97,50 @@ impl RadiologyCluster {
     }
 }
 
+// Define the connection retry function only in main.rs
+async fn connect_with_retry(url: &str, max_retries: u32, delay: Duration) 
+    -> Result<WebSocketTransport<MaybeTlsStream<TcpStream>>, Box<dyn std::error::Error>> {
+    let mut attempts = 0;
+    
+    loop {
+        attempts += 1;
+        println!("Connection attempt {}/{}", attempts, max_retries);
+        
+        match WebSocketTransport::new(url).await {
+            Ok(transport) => return Ok(transport),
+            Err(e) => {
+                if attempts >= max_retries {
+                    return Err(format!("Failed to connect after {} attempts: {}", max_retries, e).into());
+                }
+                
+                println!("Connection failed: {}. Retrying in {:?}...", e, delay);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a WebSocket transport
-    let transport = WebSocketTransport::new("ws://localhost:8080").await?;
-     
+    // Get WebSocket URL from environment variable or use default
+    let ws_url = env::var("MCP_WEBSOCKET_URL").unwrap_or_else(|_| "ws://localhost:8080".to_string());
+    
+    println!("Connecting to MCP server at: {}", ws_url);
+    
+    // Use the local connect_with_retry function
+    let transport = match connect_with_retry(&ws_url, 3, Duration::from_secs(2)).await {
+        Ok(transport) => {
+            println!("Successfully connected to MCP server");
+            transport
+        },
+        Err(e) => {
+            eprintln!("Could not connect to MCP server: {}", e);
+            eprintln!("Make sure the MCP server is running at {}", ws_url);
+            eprintln!("You can set MCP_WEBSOCKET_URL environment variable to change the server address");
+            return Err(e.into());
+        }
+    };
+    
     // Create the client with Arc-wrapped transport
     let client = Arc::new(Client::new(Arc::new(transport)));
      
